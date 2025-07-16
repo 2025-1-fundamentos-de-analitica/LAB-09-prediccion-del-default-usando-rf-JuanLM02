@@ -92,3 +92,124 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+# flake8: noqa: E501
+import gzip
+import pickle
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    balanced_accuracy_score,
+    confusion_matrix,
+)
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder
+
+
+# Cargar datos
+x_train = pd.read_pickle("files/grading/x_train.pkl")
+y_train = pd.read_pickle("files/grading/y_train.pkl")
+x_test = pd.read_pickle("files/grading/x_test.pkl")
+y_test = pd.read_pickle("files/grading/y_test.pkl")
+
+
+# ColumnTransformer
+categorical = x_train.select_dtypes(include="object").columns.tolist()
+numerical = x_train.select_dtypes(exclude="object").columns.tolist()
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("cat", OneHotEncoder(handle_unknown="ignore"), categorical),
+        ("num", "passthrough", numerical),
+    ]
+)
+
+
+#  Pipeline + GridSearch
+pipe = Pipeline(
+    steps=[
+        ("preprocessor", preprocessor),
+        ("classifier", RandomForestClassifier(random_state=42)),
+    ]
+)
+
+param_grid = {
+    "classifier__n_estimators": [100, 200],
+    "classifier__max_depth": [10, 20, None],
+    "classifier__min_samples_split": [2, 5, 10],
+    "classifier__min_samples_leaf": [1, 2, 5],
+    "classifier__class_weight": ["balanced"],
+}
+
+grid_search = GridSearchCV(
+    estimator=pipe,
+    param_grid=param_grid,
+    scoring="balanced_accuracy",
+    cv=3,
+    verbose=1,
+    n_jobs=-1,
+)
+
+grid_search.fit(x_train, y_train)
+
+
+#  Guardar modelo
+Path("files/models").mkdir(parents=True, exist_ok=True)
+with gzip.open("files/models/model.pkl.gz", "wb") as f:
+    pickle.dump(grid_search, f)
+
+
+#  Métricas
+def get_metrics(y_true, y_pred, dataset_name):
+    prec = precision_score(y_true, y_pred, zero_division=0)
+    rec = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+    bal_acc = balanced_accuracy_score(y_true, y_pred)
+
+    cm = confusion_matrix(y_true, y_pred)
+    tn, fp, fn, tp = cm.ravel()
+
+    metrics = [
+        {
+            "type": "metrics",
+            "dataset": dataset_name,
+            "precision": prec,
+            "balanced_accuracy": bal_acc,
+            "recall": rec,
+            "f1_score": f1,
+        },
+        {
+            "type": "cm_matrix",
+            "dataset": dataset_name,
+            "true_0": {"predicted_0": int(tn), "predicted_1": int(fp)},
+            "true_1": {"predicted_0": int(fn), "predicted_1": int(tp)},
+        },
+    ]
+    return metrics
+
+y_train_pred = grid_search.predict(x_train)
+y_test_pred = grid_search.predict(x_test)
+
+metrics_train = get_metrics(y_train, y_train_pred, "train")
+metrics_test = get_metrics(y_test, y_test_pred, "test")
+
+all_metrics = metrics_train + metrics_test
+
+
+#  Guardar metrics.json
+Path("files/output").mkdir(parents=True, exist_ok=True)
+with open("files/output/metrics.json", "w", encoding="utf-8") as f:
+    for m in all_metrics:
+        f.write(json.dumps(m) + "\n")
+
+print("Entrenamiento completo. Métricas:")
+for m in all_metrics:
+    print(m)
